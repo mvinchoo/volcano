@@ -327,9 +327,6 @@ func (pmpt *Action) normalPreempt(
 	if pmpt.enableStrictGangPreemption {
 		klog.V(4).Infof("Checking if nodes have free space due to previous strict gang preemption.")
 		for _, node := range selectedNodes {
-			if !preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
-				continue
-			}
 			if ssn.Allocatable(currentQueue, preemptor) && preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
 				if err := stmt.Pipeline(preemptor, node.Name, true); err != nil {
 					klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
