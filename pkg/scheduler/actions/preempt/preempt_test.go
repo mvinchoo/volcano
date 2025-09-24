@@ -306,21 +306,8 @@ func TestPreempt(t *testing.T) {
 		test.PriClass = []*schedulingv1.PriorityClass{highPrio, lowPrio}
 		t.Run(test.Name, func(t *testing.T) {
 			test.RegisterSession(tiers, []conf.Configuration{{Name: actions[0].Name(),
-				Arguments: map[string]interface{}{EnableTopologyAwarePreemptionKey: false}}})
-			defer test.Close()
-			test.Run(actions)
-			if err := test.CheckAll(i); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-	actions = []framework.Action{New()}
-	for i, test := range tests {
-		test.Plugins = plugins
-		test.PriClass = []*schedulingv1.PriorityClass{highPrio, lowPrio}
-		t.Run(test.Name, func(t *testing.T) {
-			test.RegisterSession(tiers, []conf.Configuration{{Name: actions[0].Name(),
-				Arguments: map[string]interface{}{EnableStrictGangPreemptionKey: false}}})
+				Arguments: map[string]interface{}{EnableTopologyAwarePreemptionKey: false,
+					EnableStrictGangPreemptionKey: false}}})
 			defer test.Close()
 			test.Run(actions)
 			if err := test.CheckAll(i); err != nil {
