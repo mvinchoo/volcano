@@ -384,11 +384,21 @@ func (pmpt *Action) normalPreempt(
 			var evictionPreemptees []*api.TaskInfo
 			if pmpt.enableStrictGangPreemption {
 				parentPreemptee := victimsQueue.Pop().(*api.TaskInfo)
+
+				// If the victim task's job is already being preempted (status is Releasing), skip.
+				// This avoids double-counting resources and redundant evictions.
+				if task, found := ssn.Jobs[parentPreemptee.Job].Tasks[parentPreemptee.UID]; found && task.Status == api.Releasing {
+					continue
+				}
+
 				klog.V(3).Infof("StrictGangPreemption: Victim Task <%s/%s> from Job <%s/%s> for Task <%s/%s>",
 					parentPreemptee.Namespace, parentPreemptee.Name, ssn.Jobs[parentPreemptee.Job].Name,
 					ssn.Jobs[parentPreemptee.Job].Namespace, preemptor.Namespace, preemptor.Name)
 				for _, t := range ssn.Jobs[parentPreemptee.Job].Tasks {
-					evictionPreemptees = append(evictionPreemptees, t)
+					// Only evict tasks that are not in a terminal state.
+					if t.Status != api.Succeeded && t.Status != api.Failed {
+						evictionPreemptees = append(evictionPreemptees, t)
+					}
 				}
 			} else {
 				preemptee := victimsQueue.Pop().(*api.TaskInfo)
