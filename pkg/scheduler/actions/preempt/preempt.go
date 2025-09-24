@@ -56,6 +56,9 @@ const (
 	MinCandidateNodesPercentageKey = "minCandidateNodesPercentage"
 	MinCandidateNodesAbsoluteKey   = "minCandidateNodesAbsolute"
 	MaxCandidateNodesAbsoluteKey   = "maxCandidateNodesAbsolute"
+
+	// EnableStrictGangPreemptionKey gang.EnablePreemptable must be disabled for this feature to work flawlessly.
+	EnableStrictGangPreemptionKey = "enableStrictGangPreemption"
 )
 
 type Action struct {
@@ -69,6 +72,8 @@ type Action struct {
 	minCandidateNodesPercentage   int
 	minCandidateNodesAbsolute     int
 	maxCandidateNodesAbsolute     int
+
+	enableStrictGangPreemption bool
 }
 
 func New() *Action {
@@ -79,6 +84,7 @@ func New() *Action {
 		minCandidateNodesPercentage:   10,
 		minCandidateNodesAbsolute:     1,
 		maxCandidateNodesAbsolute:     100,
+		enableStrictGangPreemption:    false,
 	}
 }
 
@@ -96,6 +102,7 @@ func (pmpt *Action) parseArguments(ssn *framework.Session) {
 	arguments.GetInt(&pmpt.minCandidateNodesPercentage, MinCandidateNodesPercentageKey)
 	arguments.GetInt(&pmpt.minCandidateNodesAbsolute, MinCandidateNodesAbsoluteKey)
 	arguments.GetInt(&pmpt.maxCandidateNodesAbsolute, MaxCandidateNodesAbsoluteKey)
+	arguments.GetBool(&pmpt.enableStrictGangPreemption, EnableStrictGangPreemptionKey)
 	pmpt.ssn = ssn
 }
 
@@ -316,6 +323,27 @@ func (pmpt *Action) normalPreempt(
 
 	currentQueue := ssn.Queues[job.Queue]
 
+	// Check if we have a node with resources available due to strictGangPreemption
+	if pmpt.enableStrictGangPreemption {
+		klog.V(4).Infof("Checking if nodes have free space due to previous strict gang preemption.")
+		for _, node := range selectedNodes {
+			if !preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
+				continue
+			}
+			if ssn.Allocatable(currentQueue, preemptor) && preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
+				if err := stmt.Pipeline(preemptor, node.Name, true); err != nil {
+					klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
+						preemptor.Namespace, preemptor.Name, node.Name)
+					if rollbackErr := stmt.UnPipeline(preemptor); rollbackErr != nil {
+						klog.Errorf("Failed to unpipeline Task %v on %v in Session %v for %v.",
+							preemptor.UID, node.Name, ssn.UID, rollbackErr)
+					}
+				}
+				return true, nil
+			}
+		}
+	}
+
 	assigned := false
 
 	for _, node := range selectedNodes {
@@ -356,15 +384,30 @@ func (pmpt *Action) normalPreempt(
 			if ssn.Allocatable(currentQueue, preemptor) && preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
 				break
 			}
-			preemptee := victimsQueue.Pop().(*api.TaskInfo)
-			klog.V(3).Infof("Try to preempt Task <%s/%s> for Task <%s/%s>",
-				preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name)
-			if err := stmt.Evict(preemptee, "preempt"); err != nil {
-				klog.Errorf("Failed to preempt Task <%s/%s> for Task <%s/%s>: %v",
-					preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name, err)
-				continue
+			var evictionPreemptees []*api.TaskInfo
+			if pmpt.enableStrictGangPreemption {
+				parentPreemptee := victimsQueue.Pop().(*api.TaskInfo)
+				klog.V(3).Infof("StrictGangPreemption: Victim Task <%s/%s> from Job <%s/%s> for Task <%s/%s>",
+					parentPreemptee.Namespace, parentPreemptee.Name, ssn.Jobs[parentPreemptee.Job].Name,
+					ssn.Jobs[parentPreemptee.Job].Namespace, preemptor.Namespace, preemptor.Name)
+				for _, t := range ssn.Jobs[parentPreemptee.Job].Tasks {
+					evictionPreemptees = append(evictionPreemptees, t)
+				}
+			} else {
+				preemptee := victimsQueue.Pop().(*api.TaskInfo)
+				evictionPreemptees = append(evictionPreemptees, preemptee)
 			}
-			preempted.Add(preemptee.Resreq)
+
+			for _, preemptee := range evictionPreemptees {
+				klog.V(3).Infof("Try to preempt Task <%s/%s> for Task <%s/%s>",
+					preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name)
+				if err := stmt.Evict(preemptee, "preempt"); err != nil {
+					klog.Errorf("Failed to preempt Task <%s/%s> for Task <%s/%s>: %v",
+						preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name, err)
+					continue
+				}
+				preempted.Add(preemptee.Resreq)
+			}
 		}
 
 		evictionOccurred := false
