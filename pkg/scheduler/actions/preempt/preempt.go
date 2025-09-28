@@ -57,7 +57,6 @@ const (
 	MinCandidateNodesAbsoluteKey   = "minCandidateNodesAbsolute"
 	MaxCandidateNodesAbsoluteKey   = "maxCandidateNodesAbsolute"
 
-	// EnableStrictGangPreemptionKey gang.EnablePreemptable must be disabled for this feature to work flawlessly.
 	EnableStrictGangPreemptionKey = "enableStrictGangPreemption"
 )
 
@@ -381,39 +380,44 @@ func (pmpt *Action) normalPreempt(
 			if ssn.Allocatable(currentQueue, preemptor) && preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
 				break
 			}
+			preemptee := victimsQueue.Pop().(*api.TaskInfo)
 			var evictionPreemptees []*api.TaskInfo
+			evictionPreemptees = append(evictionPreemptees, preemptee)
 			if pmpt.enableStrictGangPreemption {
-				parentPreemptee := victimsQueue.Pop().(*api.TaskInfo)
-
 				// If the victim task's job is already being preempted (status is Releasing), skip.
 				// This avoids double-counting resources and redundant evictions.
-				if task, found := ssn.Jobs[parentPreemptee.Job].Tasks[parentPreemptee.UID]; found && task.Status == api.Releasing {
+				if task, f := ssn.Jobs[preemptee.Job].Tasks[preemptee.UID]; f && task.Status == api.Releasing {
 					continue
 				}
+				klog.V(3).Infof("StrictGangPreemption: Initial Victim Task <%s/%s> from Job <%s/%s> for Task <%s/%s>",
+					preemptee.Namespace, preemptee.Name, ssn.Jobs[preemptee.Job].Name,
+					ssn.Jobs[preemptee.Job].Namespace, preemptor.Namespace, preemptor.Name)
 
-				klog.V(3).Infof("StrictGangPreemption: Victim Task <%s/%s> from Job <%s/%s> for Task <%s/%s>",
-					parentPreemptee.Namespace, parentPreemptee.Name, ssn.Jobs[parentPreemptee.Job].Name,
-					ssn.Jobs[parentPreemptee.Job].Namespace, preemptor.Namespace, preemptor.Name)
-				for _, t := range ssn.Jobs[parentPreemptee.Job].Tasks {
+				var victimJobTasksToEvict []*api.TaskInfo
+				for _, t := range ssn.Jobs[preemptee.Job].Tasks {
 					// Only evict tasks that are not in a terminal state.
-					if t.Status != api.Succeeded && t.Status != api.Failed {
-						evictionPreemptees = append(evictionPreemptees, t)
+					if t.Status != api.Succeeded && t.Status != api.Failed && t.UID != preemptee.UID {
+						victimJobTasksToEvict = append(victimJobTasksToEvict, t)
 					}
 				}
-			} else {
-				preemptee := victimsQueue.Pop().(*api.TaskInfo)
-				evictionPreemptees = append(evictionPreemptees, preemptee)
+				// Refilter preemptees as all the tasks in PreempteeJob are now potential victims.
+				// This ensures that plugin level overrides are respected.
+				victimJobPQ := ssn.BuildVictimsPriorityQueue(victimJobTasksToEvict, preemptor)
+				for !victimJobPQ.Empty() {
+					evictionPreemptees = append(evictionPreemptees, victimJobPQ.Pop().(*api.TaskInfo))
+				}
+				evictionPreemptees = ssn.Preemptable(preemptor, evictionPreemptees)
 			}
 
-			for _, preemptee := range evictionPreemptees {
+			for _, p := range evictionPreemptees {
 				klog.V(3).Infof("Try to preempt Task <%s/%s> for Task <%s/%s>",
-					preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name)
-				if err := stmt.Evict(preemptee, "preempt"); err != nil {
+					p.Namespace, p.Name, preemptor.Namespace, preemptor.Name)
+				if err := stmt.Evict(p, "preempt"); err != nil {
 					klog.Errorf("Failed to preempt Task <%s/%s> for Task <%s/%s>: %v",
-						preemptee.Namespace, preemptee.Name, preemptor.Namespace, preemptor.Name, err)
+						p.Namespace, p.Name, preemptor.Namespace, preemptor.Name, err)
 					continue
 				}
-				preempted.Add(preemptee.Resreq)
+				preempted.Add(p.Resreq)
 			}
 		}
 
