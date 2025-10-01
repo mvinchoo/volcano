@@ -138,7 +138,7 @@ func (pc *Scheduler) loadSchedulerConf() {
 	klog.V(4).Infof("Start loadSchedulerConf ...")
 	defer func() {
 		actions, plugins := pc.getSchedulerConf()
-		klog.V(2).Infof("Successfully loaded Scheduler conf, actions: %v, plugins: %v", actions, plugins)
+klog.V(2).Infof("Finished loading scheduler config. Final state: actions=%v, plugins=%v", actions, plugins)
 	}()
 
 	if pc.disableDefaultConf && len(pc.schedulerConf) == 0 {
